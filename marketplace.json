@@ -1,5 +1,8 @@
 {
-  "owner": "bdujsk",
+  "owner": {
+    "name": "bdujsk",
+    "type": "user"
+  },
   "name": "jsk-marketplace",
   "displayName": "JSK Marketplace",
   "description": "Private GitHub Copilot CLI plugin marketplace",
