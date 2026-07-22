@@ -1,0 +1,13 @@
+{
+  "name": "jsk-marketplace",
+  "displayName": "JSK Marketplace",
+  "description": "Private GitHub Copilot CLI plugin marketplace",
+  "plugins": [
+    {
+      "name": "oc-dr",
+      "displayName": "OpenShift Disaster Recovery",
+      "description": "OpenShift Disaster Recovery using Velero/OADP",
+      "path": "./oc-dr"
+    }
+  ]
+}
