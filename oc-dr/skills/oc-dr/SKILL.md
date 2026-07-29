@@ -262,6 +262,111 @@ Mappings are idempotent — each namespace is prompted only once per session.
 
 ---
 
+---
+
+## Full Prereq Flow
+
+```
+run_prereq_restores()
+│
+├── STEP 1 ─ Namespaces / NetworkPolicies / EgressFirewalls
+│   Pattern : ose-infrastructure-backup-bankdata-resources-*
+│   Scope   : includedNamespaces: ["*"]  (all namespaces)
+│   Resources: Namespace, NetworkPolicy, EgressFirewall
+│   Mode    : inline — no user selection, auto-applied
+│
+├── STEP 2 ─ _restore_db2_prereq()
+│   Pattern : db2u-velero-backup-*
+│   │
+│   ├─ List newest per base name
+│   ├─ User selects: "1" / "1,2" / "all" / Enter=skip
+│   ├─ For each selected:
+│   │   ├─ Auto-detect namespace from Backup CR (fallback: ose-db2-bd)
+│   │   ├─ prompt_ns_mapping_single (original or DR namespace)
+│   │   ├─ Render YAML → prereq-db2-<ns>.yaml
+│   │   │   excludedResources: nodes, events, backups, restores, …
+│   │   │   restorePVs: auto-detected (snapshot vs file-system)
+│   │   └─ _show_yaml_box → confirm → oc apply → wait_for_restore
+│   └─ Continues even on PartiallyFailed (prompt)
+│
+├── STEP 3 ─ _restore_wcm_prereq()  [WCM / MEP / EBA / …]
+│   Patterns: dxo-velero-backup-all-crds-*  +  dxo-velero-backup-pvc-only-*
+│   │
+│   ├─ List all-crds backups (newest per base)
+│   ├─ User selects all-crds backup(s)
+│   ├─ List pvc-only backups
+│   ├─ User selects pvc-only backup(s) for Phase B (or skip)
+│   │
+│   ├─ For each selected all-crds backup:
+│   │   ├─ Auto-detect namespace from Backup CR
+│   │   ├─ prompt_ns_mapping_single
+│   │   │
+│   │   ├─ PHASE A → prereq-wcm-<ns>-a-sa.yaml
+│   │   │   includedResources: ClusterRole, ServiceAccount only
+│   │   │   (no PVCs — SAs must exist before PVCs are bound)
+│   │   │
+│   │   └─ PHASE B → prereq-wcm-<ns>-b-pvc.yaml
+│   │       backupName: pvc-only backup
+│   │       all resources except noise + restorePVs
+│   │
+│   ├─ Show ALL phase YAMLs before any prompt
+│   ├─ Single confirm → apply ALL in strict A→B order
+│   └─ Each phase waits for completion before next starts
+│
+├── STEP 5 ─ Sealed Secrets
+│   Pattern : ose-infrastructure-backup-ose-sealed-secrets-*
+│   Scope   : includedNamespaces: [ose-sealed-secrets]
+│   Resources: all except noise (nodes, events, backups, …)
+│   Mode    : inline — auto-finds newest, prompt_ns_mapping, _apply_prereq
+│   ⚠ MUST complete before ArgoCD syncs (SealedSecrets need controller)
+│
+├── STEP 6+7 ─ _restore_gitops_prereq()  [loop]
+│   Pattern : *gitops*  (all backups containing "gitops")
+│   │
+│   ├─ List newest per base name
+│   ├─ Loop until user exits or all restored:
+│   │   ├─ Show remaining backups
+│   │   ├─ User selects
+│   │   ├─ Sort by dependency order:
+│   │   │   1. openshift-gitops  (platform ArgoCD)
+│   │   │   2. ose-gitops-hub
+│   │   │   3. ose-gitops-ahx
+│   │   │   4. *-bd-* / *-bd    (bankdata ArgoCD)
+│   │   │   5. everything else
+│   │   │
+│   │   └─ For each backup (in sorted order):
+│   │       ├─ Auto-detect namespace from Backup CR
+│   │       ├─ prompt_ns_mapping_single
+│   │       ├─ Render YAML → prereq-gitops-<n>-<ns>.yaml
+│   │       │   includedResources: AppProject, Application, Secret
+│   │       ├─ _list_argocd_resources (BEFORE)   ← shows current state
+│   │       ├─ _apply_prereq → oc apply → wait_for_restore
+│   │       └─ _list_argocd_resources (AFTER)    ← shows restored state
+│   └─ "Restore another gitops backup? [y/N]"
+│
+└── STEP 8 ─ patch_argocd_destinations()
+    No backup — live cluster patching
+    ├─ Discover all *gitops* namespaces
+    ├─ Scan all Application + AppProject CRs
+    ├─ For each with spec.destination.server pointing to source cluster:
+    │   ├─ Show BEFORE box
+    │   ├─ oc patch → new DR cluster API URL
+    │   └─ Show AFTER box
+    └─ Prompt to proceed per resource
+```
+
+### Key Design Rules
+
+| Rule | Why |
+|---|---|
+| DB2 + WCM **before** ArgoCD | ArgoCD would recreate PVCs from scratch otherwise |
+| Phase A (SAs) **before** Phase B (PVCs) | PVCs need ServiceAccounts to bind correctly |
+| Sealed Secrets **before** GitOps | ArgoCD pulls SealedSecrets from Git — controller must exist |
+| GitOps sorted (platform → hub → bd) | AppProjects must exist before Applications that reference them |
+| Each `_apply_prereq` waits for completion | Next step cannot safely start on an in-flight restore |
+
+---
+
 ## Restore YAML Patterns
 
 ### Standard namespace restore
