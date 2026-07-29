@@ -11,8 +11,8 @@ description: >
 
 Context and reference knowledge for `oc-dr.sh` — an interactive bash DR script for OpenShift using Velero / OADP.
 
-- **Script**: `/Users/jsk/copilot-dir/DR/oc-dr.sh`
-- **Docs**:   `/Users/jsk/copilot-dir/DR/ose-dr-readme.md`
+- **Script**: oc-dr.sh
+- **Docs**:  ose-dr-readme.md
 
 ---
 
