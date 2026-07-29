@@ -32,40 +32,49 @@ YAML_DIR="${LOG_DIR}/restore-manifests-${TIMESTAMP}"
 ```
 
 ### Full function map
-| Function | Purpose |
-|---|---|
-| `check_prereqs` | oc login, python3, OADP CRDs, Velero pod, BSL status |
-| `list_backups` | `-l` flag: print newest per base name and exit |
-| `select_backup_interactive` | Numbered menu, supports `1`, `1,3`, `all` |
-| `validate_backup` | Checks backup phase (Completed / PartiallyFailed / other) |
-| `get_backup_included_namespaces` | Reads `spec.includedNamespaces` from Backup CR |
-| `select_namespaces_interactive` | Namespace picker per backup |
-| `get_ns_mapping NS` | Returns DR target ns for NS, or `""` if original |
-| `_ns_mapping_recorded NS` | Returns 0 if NS already prompted (idempotent) |
-| `prompt_ns_mapping_single NS` | Interactive: original ns or DR mapped ns (once per ns) |
-| `append_ns_mapping_to_yaml FILE NS` | Rewrites YAML: swaps `includedNamespaces` → `namespaceMapping` |
-| `prompt_namespace_mapping NS_LIST` | Calls `prompt_ns_mapping_single` for each ns in CSV list |
-| `pre_restore_check NS` | Warns if ns already exists with resources |
-| `_is_snapshot_backup BACKUP` | Returns 0 if CSI snapshot backup (no Restic/Kopia) |
-| `_restorePVs_yaml_line BACKUP` | Emits `restorePVs: true` or snapshot comment |
-| `render_restore_yaml NS NAME FILE TARGET_NS` | Writes Restore CR YAML (with mapping if target_ns set) |
-| `create_restore NS` | render + dry-run print or `oc apply` |
-| `wait_for_restore NAME` | Polls `status.phase` with elapsed timer, handles all phases |
-| `validate_namespace NS` | Checks pods/PVCs/routes post-restore |
-| `_show_yaml_box FILE` | Prints YAML inside a `┌─┐` border box |
-| `_apply_prereq FILE NAME DESC` | Show box → prompt → apply → wait → handle rc |
-| `_find_newest_backup PREFIX` | Newest backup matching `^PREFIX-\d` |
-| `_find_newest_backup_containing STR` | Newest backup whose name contains STR |
-| `_list_backups_matching STR` | All backup names containing STR |
-| `_list_newest_per_base_matching STR` | Newest per base name among backups containing STR |
-| `_restore_db2_prereq` | Lists `db2u-velero-backup-*`, user selects, pre-renders + applies |
-| `_restore_wcm_prereq` | Lists `dxo-velero-backup-all-crds-*` + `pvc-only-*`, Phase A→B |
-| `_list_argocd_resources NS LABEL` | Lists AppProjects + Applications in ns (before/after restore) |
-| `_restore_gitops_prereq` | Loop over all `*gitops*` backups in dependency order |
-| `run_prereq_restores` | Orchestrates all prereq steps 1–8 in order |
-| `patch_argocd_destinations` | Patches ArgoCD `spec.destination.server` to DR cluster URL |
-| `check_argocd_apps` | Final summary: lists Sync/Health of all ArgoCD apps |
-| `main` | Banner → prereqs → loop(select→preview→confirm→restore→loop?) → argocd summary |
+| Line | Function | Purpose |
+|---|---|---|
+| 73 | `error` | Print error and exit 1 |
+| 76 | `die` | Alias for error |
+| 81 | `usage` | Print usage/help and exit |
+| 147 | `check_prereqs` | oc login, python3, OADP CRDs, Velero pod, BSL status table |
+| 211 | `list_backups` | `-l` flag: print newest per base name and exit |
+| 239 | `select_backup_interactive` | Numbered menu, supports `1`, `1,3`, `all` |
+| 343 | `validate_backup` | Checks backup phase (Completed / PartiallyFailed / other) |
+| 363 | `get_backup_included_namespaces` | Reads `spec.includedNamespaces` from Backup CR |
+| 376 | `select_namespaces_interactive` | Namespace picker per backup |
+| 426 | `resolve_namespaces` | Resolves namespace list from flags or interactive selection |
+| 443 | `get_ns_mapping NS` | Returns DR target ns for NS, or `""` if original |
+| 452 | `_ns_mapping_recorded NS` | Returns 0 if NS already prompted (idempotent) |
+| 462 | `prompt_ns_mapping_single NS` | Interactive: original ns or DR mapped ns (once per ns) |
+| 490 | `append_ns_mapping_to_yaml FILE NS` | Rewrites YAML: swaps `includedNamespaces` → `namespaceMapping` |
+| 507 | `prompt_namespace_mapping NS_LIST` | Calls `prompt_ns_mapping_single` for each ns in CSV list |
+| 518 | `pre_restore_check NS` | Warns if ns already exists with resources |
+| 534 | `_is_snapshot_backup BACKUP` | Returns 0 if CSI snapshot backup (no Restic/Kopia) |
+| 545 | `_restorePVs_yaml_line BACKUP` | Emits `restorePVs: true` or snapshot comment |
+| 559 | `_play_dr_animation` | Startup: looping 5-frame DR scenario (healthy→fault→down→failover→recovered), stops on Enter |
+| 680 | `_velero_describe_backup BACKUP` | Execs into Velero pod, runs `velero backup describe --details` |
+| 712 | `_velero_describe_restore NAME` | Execs into Velero pod, runs `velero restore describe --details` after restore completes; shows restored/skipped counts |
+| 762 | `select_included_resources_interactive` | Parses backup describe output, numbered resource type picker, sets `INCLUDE_RESOURCES` global |
+| 863 | `render_restore_yaml NS NAME FILE TARGET_NS` | Writes Restore CR YAML (with mapping if target_ns set, with `includedResources` if set) |
+| 907 | `create_restore NS` | render + dry-run print or `oc apply` |
+| 937 | `wait_for_restore NAME` | Polls `status.phase` with elapsed timer, handles all phases, calls `_velero_describe_restore` on terminal phase |
+| 1009 | `validate_namespace NS` | Checks pods/PVCs/routes post-restore |
+| 1072 | `_apply_prereq FILE NAME DESC` | Show box → prompt → apply → wait → handle rc |
+| 1125 | `_find_newest_backup PREFIX` | Newest backup matching `^PREFIX-\d` |
+| 1143 | `_find_newest_backup_containing STR` | Newest backup whose name contains STR |
+| 1160 | `_list_backups_matching STR` | All backup names containing STR |
+| 1177 | `_list_newest_per_base_matching STR` | Newest per base name among backups containing STR |
+| 1201 | `_show_yaml_box FILE` | Prints YAML inside a `┌─┐` border box |
+| 1214 | `_restore_db2_prereq` | Lists `db2u-velero-backup-*`, user selects, pre-renders + applies |
+| 1352 | `_restore_wcm_prereq` | Lists `dxo-velero-backup-all-crds-*` + `pvc-only-*`, Phase A→B |
+| 1573 | `_list_argocd_resources NS LABEL` | Lists AppProjects, Applications, and ArgoCD secrets (`argocd.argoproj.io/secret-type`) with decoded data (sensitive fields masked) |
+| 1657 | `_restore_gitops_prereq` | Loop over all `*gitops*` backups in dependency order |
+| 1800 | `run_prereq_restores` | Orchestrates all prereq steps 1–8 in order |
+| 1884 | `patch_argocd_destinations` | Discover `*gitops*` namespaces, loop: scan apps, patch `spec.destination.server` to DR cluster URL, show BEFORE/AFTER |
+| 2152 | `_patch_argocd_resource KIND NAME NS OLD NEW` | Shows BEFORE box → patch → AFTER box for one ArgoCD resource |
+| 2212 | `check_argocd_apps` | Final summary: lists Sync/Health of all ArgoCD apps |
+| 2249 | `main` | clear → compact banner → challenges box → animation (Enter to continue) → flow box → Enter → prereqs → restore loop → argocd summary |
 
 ### Bash 3.2 compatibility rules (macOS default shell)
 - **No `declare -A`** — use parallel indexed arrays instead
@@ -81,7 +90,36 @@ YAML_DIR="${LOG_DIR}/restore-manifests-${TIMESTAMP}"
 
 ---
 
-## Prerequisite Restore Order (`run_prereq_restores`)
+## Startup Sequence (`main`)
+
+```
+clear
+→ Compact 3-line block-letter banner  (OPENSHIFT / DISASTER / RECOVERY)
+→ Subtitle + separator line
+→ CHALLENGES box (yellow) — backup/recovery challenges to consider
+→ _play_dr_animation — loops 5 frames until Enter pressed
+→ Flow box (oc-dr.sh steps overview)
+→ Press Enter to continue
+→ check_prereqs
+→ run_prereq_restores
+→ main restore loop (select backup → describe/filter → namespaces → YAML → confirm → restore → validate → loop?)
+→ check_argocd_apps
+```
+
+### `_play_dr_animation` frames
+Runs in background subshell, cycles continuously until user presses Enter:
+
+| Frame | State | Colours | Delay |
+|---|---|---|---|
+| 1 | Normal Operation | green / dim | 0.8s |
+| 2 | Incident Detected | yellow / dim | 0.6s |
+| 3 | Cluster Down | red / dim | 1.2s |
+| 4 | Failover | red → yellow | 1.5s |
+| 5 | DR Recovered | dim → green | 2.0s |
+
+Uses sentinel file `/tmp/dr_anim_XXXXXX` to signal stop. Clears animation area with `\033[1A\033[2K` per line on exit.
+
+---
 
 Steps run in strict dependency order — ORDER MATTERS.
 
@@ -127,6 +165,73 @@ EOF
     append_ns_mapping_to_yaml "$yaml_file" "my-namespace"
     _apply_prereq "$yaml_file" "$restore_name" "MyResources (my-namespace)"
   fi
+```
+
+---
+
+## `_list_argocd_resources` — ArgoCD Resource Display
+
+Called before and after each gitops prereq restore. Shows three sections per namespace:
+
+1. **AppProjects** — names only
+2. **Applications** — name, sync status, health status
+3. **Secrets** (`argocd.argoproj.io/secret-type`) — decoded data with sensitive fields masked
+
+```
+  Secrets (argocd.argoproj.io/secret-type):
+    ┌─ my-dr-cluster  [cluster]
+    │  name                   dr-cluster
+    │  server                 https://api.dr.paas.example.dk:6443
+    │  insecure               false
+    │  tlsClientCertData      ***masked***
+    └────────────────────────────────────────
+    ┌─ my-repo  [repository]
+    │  url                    https://github.com/org/repo.git
+    │  type                   git
+    │  username               deploy-bot
+    │  password               ***masked***
+    └────────────────────────────────────────
+```
+
+**Masked fields**: `password`, `sshPrivateKey`, `bearerToken`, `token`, `tlsClientCertData`, `tlsClientCertKey`, `clientSecret`
+
+**Display order**: `name → server → url → type → project → username → insecure → (sensitive) → remaining`
+
+Uses `ARGOCD_SECRETS_JSON` env var to pass JSON to Python (avoids stdin/heredoc conflict).
+
+---
+
+## `_velero_describe_restore` — Post-Restore Summary
+
+Called automatically by `wait_for_restore` on every terminal phase (Completed, WaitingForPluginOperations, PartiallyFailed, Failed). Execs into Velero pod and runs `velero restore describe <name> --details --insecure-skip-tls-verify`.
+
+Output:
+```
+ℹ Restore describe: restore-db2-ose-db2-20260727-095856
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<full velero describe output>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✔  Restored: 47  Skipped: 12
+# or:
+⚠  Restored: 0  Skipped: 47 — all resources were skipped (already exist?)
+```
+
+---
+
+## `select_included_resources_interactive` — Resource Filter
+
+Called after backup describe, before namespace selection. Parses `velero backup describe --details` output to extract resource kinds. User can select a subset to include — sets global `INCLUDE_RESOURCES` (comma-separated). Reset to `""` each main loop iteration. `render_restore_yaml` emits `includedResources:` block when set.
+
+---
+
+## `check_prereqs` — BSL Table
+
+Prints a formatted table of BackupStorageLocations before the Available/warn message:
+
+```
+  NAME          PHASE       PROVIDER    LAST SYNC
+  ────────────  ──────────  ──────────  ────────────────────
+  default       Available   aws         2026-07-29T08:00:00Z
 ```
 
 ---
@@ -191,6 +296,7 @@ spec:
   includedResources:
     - AppProject
     - Application
+    - Secret
   includedNamespaces:
     - ose-gitops
 ```
@@ -333,3 +439,8 @@ VELERO_NS=velero ./oc-dr.sh                        # override Velero namespace
 | Prereq backup not found | Name prefix mismatch | `oc get backups.velero.io -n openshift-adp` |
 | ArgoCD apps not syncing | Sealed secrets missing or gitops prereq not run | Re-run prereqs in order |
 | Wrong `spec.destination.server` | Source and DR cluster have different API URLs | Run `patch_argocd_destinations` (step 8) |
+| `velero describe restore` fails | Velero pod not found or binary not at `/velero` | Check `oc get pods -n openshift-adp -l app.kubernetes.io/name=velero` |
+| ArgoCD secret data empty | Secret not restored (gitops prereq skipped) | Re-run `_restore_gitops_prereq`; check `Secret` in `includedResources` |
+| `JSONDecodeError` in secrets display | Python received empty stdin (heredoc conflict) | Pass JSON via env var `ARGOCD_SECRETS_JSON` — already fixed in current version |
+| Animation doesn't stop on Enter | `\033[J` cleared "Press Enter" prompt | Fixed: use `\033[1A\033[2K` per-line rewind |
+| Python f-string syntax error | Python < 3.12 rejects `f"{\"NAME\":<40}"` | Use `%`-formatting: `"%-40s" % value` — applies everywhere in script |
