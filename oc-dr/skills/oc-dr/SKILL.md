@@ -21,6 +21,10 @@ Context and reference knowledge for `oc-dr.sh` — an interactive bash DR script
 ## Full Prereq Flow
 
 All steps run in strict dependency order inside `run_prereq_restores()`. **ORDER MATTERS** — do not skip or reorder steps.
+Guide the user through all steps.
+All steps are included in script : oc-dr.sh 
+
+
 
 ---
 
