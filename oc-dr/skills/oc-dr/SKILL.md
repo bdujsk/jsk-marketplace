@@ -266,94 +266,95 @@ Mappings are idempotent — each namespace is prompted only once per session.
 
 ## Full Prereq Flow
 
-```
-run_prereq_restores()
-│
-├── STEP 1 ─ Namespaces / NetworkPolicies / EgressFirewalls
-│   Pattern : ose-infrastructure-backup-bankdata-resources-*
-│   Scope   : includedNamespaces: ["*"]  (all namespaces)
-│   Resources: Namespace, NetworkPolicy, EgressFirewall
-│   Mode    : inline — no user selection, auto-applied
-│
-├── STEP 2 ─ _restore_db2_prereq()
-│   Pattern : db2u-velero-backup-*
-│   │
-│   ├─ List newest per base name
-│   ├─ User selects: "1" / "1,2" / "all" / Enter=skip
-│   ├─ For each selected:
-│   │   ├─ Auto-detect namespace from Backup CR (fallback: ose-db2-bd)
-│   │   ├─ prompt_ns_mapping_single (original or DR namespace)
-│   │   ├─ Render YAML → prereq-db2-<ns>.yaml
-│   │   │   excludedResources: nodes, events, backups, restores, …
-│   │   │   restorePVs: auto-detected (snapshot vs file-system)
-│   │   └─ _show_yaml_box → confirm → oc apply → wait_for_restore
-│   └─ Continues even on PartiallyFailed (prompt)
-│
-├── STEP 3 ─ _restore_wcm_prereq()  [WCM / MEP / EBA / …]
-│   Patterns: dxo-velero-backup-all-crds-*  +  dxo-velero-backup-pvc-only-*
-│   │
-│   ├─ List all-crds backups (newest per base)
-│   ├─ User selects all-crds backup(s)
-│   ├─ List pvc-only backups
-│   ├─ User selects pvc-only backup(s) for Phase B (or skip)
-│   │
-│   ├─ For each selected all-crds backup:
-│   │   ├─ Auto-detect namespace from Backup CR
-│   │   ├─ prompt_ns_mapping_single
-│   │   │
-│   │   ├─ PHASE A → prereq-wcm-<ns>-a-sa.yaml
-│   │   │   includedResources: ClusterRole, ServiceAccount only
-│   │   │   (no PVCs — SAs must exist before PVCs are bound)
-│   │   │
-│   │   └─ PHASE B → prereq-wcm-<ns>-b-pvc.yaml
-│   │       backupName: pvc-only backup
-│   │       all resources except noise + restorePVs
-│   │
-│   ├─ Show ALL phase YAMLs before any prompt
-│   ├─ Single confirm → apply ALL in strict A→B order
-│   └─ Each phase waits for completion before next starts
-│
-├── STEP 5 ─ Sealed Secrets
-│   Pattern : ose-infrastructure-backup-ose-sealed-secrets-*
-│   Scope   : includedNamespaces: [ose-sealed-secrets]
-│   Resources: all except noise (nodes, events, backups, …)
-│   Mode    : inline — auto-finds newest, prompt_ns_mapping, _apply_prereq
-│   ⚠ MUST complete before ArgoCD syncs (SealedSecrets need controller)
-│
-├── STEP 6+7 ─ _restore_gitops_prereq()  [loop]
-│   Pattern : *gitops*  (all backups containing "gitops")
-│   │
-│   ├─ List newest per base name
-│   ├─ Loop until user exits or all restored:
-│   │   ├─ Show remaining backups
-│   │   ├─ User selects
-│   │   ├─ Sort by dependency order:
-│   │   │   1. openshift-gitops  (platform ArgoCD)
-│   │   │   2. ose-gitops-hub
-│   │   │   3. ose-gitops-ahx
-│   │   │   4. *-bd-* / *-bd    (bankdata ArgoCD)
-│   │   │   5. everything else
-│   │   │
-│   │   └─ For each backup (in sorted order):
-│   │       ├─ Auto-detect namespace from Backup CR
-│   │       ├─ prompt_ns_mapping_single
-│   │       ├─ Render YAML → prereq-gitops-<n>-<ns>.yaml
-│   │       │   includedResources: AppProject, Application, Secret
-│   │       ├─ _list_argocd_resources (BEFORE)   ← shows current state
-│   │       ├─ _apply_prereq → oc apply → wait_for_restore
-│   │       └─ _list_argocd_resources (AFTER)    ← shows restored state
-│   └─ "Restore another gitops backup? [y/N]"
-│
-└── STEP 8 ─ patch_argocd_destinations()
-    No backup — live cluster patching
-    ├─ Discover all *gitops* namespaces
-    ├─ Scan all Application + AppProject CRs
-    ├─ For each with spec.destination.server pointing to source cluster:
-    │   ├─ Show BEFORE box
-    │   ├─ oc patch → new DR cluster API URL
-    │   └─ Show AFTER box
-    └─ Prompt to proceed per resource
-```
+All steps run in strict dependency order inside `run_prereq_restores()`. **ORDER MATTERS** — do not skip or reorder steps.
+
+---
+
+### STEP 1 — Namespaces / NetworkPolicies / EgressFirewalls
+
+- **Backup pattern**: `ose-infrastructure-backup-bankdata-resources-*`
+- **Scope**: `includedNamespaces: ["*"]` (all namespaces)
+- **Resources**: `Namespace`, `NetworkPolicy`, `EgressFirewall`
+- **Mode**: inline — no user selection, auto-applied immediately
+
+---
+
+### STEP 2 — DB2 (`_restore_db2_prereq`)
+
+- **Backup pattern**: `db2u-velero-backup-*`
+- **User interaction**: numbered menu — enter `1`, `1,2`, `all`, or press Enter to skip
+- **Per selected backup**:
+  1. Auto-detect namespace from Backup CR (fallback: `ose-db2-bd`)
+  2. `prompt_ns_mapping_single` — original or DR namespace
+  3. Render YAML → `prereq-db2-<ns>.yaml`
+     - `excludedResources`: nodes, events, backups, restores, …
+     - `restorePVs`: auto-detected (snapshot vs file-system)
+  4. Show YAML box → confirm → `oc apply` → `wait_for_restore`
+- Continues even on `PartiallyFailed` (user prompted)
+
+---
+
+### STEP 3 — WCM / MEP / EBA (`_restore_wcm_prereq`)
+
+- **Backup patterns**: `dxo-velero-backup-all-crds-*` + `dxo-velero-backup-pvc-only-*`
+- **User interaction**: select all-crds backup(s), then optionally select pvc-only backup(s) for Phase B
+- **Per selected all-crds backup**:
+  1. Auto-detect namespace from Backup CR
+  2. `prompt_ns_mapping_single`
+  3. **Phase A** → `prereq-wcm-<ns>-a-sa.yaml`
+     - `includedResources`: `ClusterRole`, `ServiceAccount` only
+     - SAs must exist before PVCs are bound
+  4. **Phase B** → `prereq-wcm-<ns>-b-pvc.yaml`
+     - `backupName`: pvc-only backup
+     - All resources except noise + `restorePVs`
+- All phase YAMLs shown before any prompt
+- Single confirm → apply ALL in strict A → B order
+- Each phase waits for completion before next starts
+
+---
+
+### STEP 5 — Sealed Secrets
+
+- **Backup pattern**: `ose-infrastructure-backup-ose-sealed-secrets-*`
+- **Scope**: `includedNamespaces: [ose-sealed-secrets]`
+- **Resources**: all except noise (nodes, events, backups, …)
+- **Mode**: inline — auto-finds newest, `prompt_ns_mapping`, `_apply_prereq`
+- ⚠️ **Must complete before ArgoCD syncs** — SealedSecrets controller must exist first
+
+---
+
+### STEP 6+7 — GitOps / ArgoCD (`_restore_gitops_prereq`)
+
+- **Backup pattern**: `*gitops*` (all backups containing "gitops")
+- **User interaction**: loop — select backups, restore, then prompted to restore more
+- **Dependency sort order** (applied automatically):
+  1. `openshift-gitops` — platform ArgoCD
+  2. `ose-gitops-hub`
+  3. `ose-gitops-ahx`
+  4. `*-bd-*` / `*-bd` — Bankdata ArgoCD
+  5. everything else
+- **Per backup (in sorted order)**:
+  1. Auto-detect namespace from Backup CR
+  2. `prompt_ns_mapping_single`
+  3. Render YAML → `prereq-gitops-<n>-<ns>.yaml`
+     - `includedResources`: `AppProject`, `Application`, `Secret`
+  4. `_list_argocd_resources` (BEFORE) — shows current state
+  5. `_apply_prereq` → `oc apply` → `wait_for_restore`
+  6. `_list_argocd_resources` (AFTER) — shows restored state
+- Ends with prompt: `"Restore another gitops backup? [y/N]"`
+
+---
+
+### STEP 8 — Patch ArgoCD Destinations (`patch_argocd_destinations`)
+
+- **No backup** — live cluster patching only
+- Discovers all `*gitops*` namespaces
+- Scans all `Application` + `AppProject` CRs
+- For each resource where `spec.destination.server` points to the **source** cluster:
+  1. Show BEFORE box
+  2. `oc patch` → new DR cluster API URL
+  3. Show AFTER box
+  4. Prompt to proceed per resource
 
 ### Key Design Rules
 
