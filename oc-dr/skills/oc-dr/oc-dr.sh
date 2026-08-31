@@ -2006,7 +2006,7 @@ d=json.load(sys.stdin)
 seen=set()
 for item in d.get('items',[]):
     s=item.get('spec',{}).get('destination',{}).get('server','')
-    if s and s not in seen:
+    if s and s != '*' and s not in seen:
         seen.add(s); print(s)
 " 2>/dev/null || true)
 
@@ -2026,7 +2026,7 @@ seen=set()
 for item in d.get('items',[]):
     for dest in item.get('spec',{}).get('destinations',[]):
         s=dest.get('server','')
-        if s and s not in seen:
+        if s and s != '*' and s not in seen:
             seen.add(s); print(s)
 " 2>/dev/null || true)
     done
@@ -2060,8 +2060,9 @@ for item in d.get('items',[]):
         old_server="$choice"
       fi
     elif [[ ${#found_servers[@]} -gt 0 ]]; then
-      ok "All Applications already point to '${new_server}' — no patching needed for selected namespace(s)."
-      old_server=""
+      ok "All Applications/AppProjects already point to '${new_server}'."
+      read -r -p "  Enter old (source) server URL to replace [${found_servers[0]}]: " old_server
+      old_server="${old_server:-${found_servers[0]}}"
     else
       warn "No spec.destination.server found — apps may use spec.destination.name (no patch needed)."
       read -r -p "  Enter old (source) server URL manually if needed [Enter to skip]: " old_server
@@ -2073,15 +2074,26 @@ for item in d.get('items',[]):
       info "Replacing: server=${old_server}  →  name=${dest_name}"
 
       # --- 4. Build patch list ---
+      # Match resources two ways: (a) server == old_server (classic case),
+      # or (b) already using .name but with a different value than the
+      # desired dest_name — these also need to be corrected.
       local -a p_display=() p_app_ns=() p_app_name=() p_kind=()
       for gns in "${selected_ns[@]}"; do
         local app_name
         while IFS= read -r app_name; do
           [[ -z "$app_name" ]] && continue
-          local cur_server
+          local cur_server cur_name
           cur_server=$(oc get application.argoproj.io "$app_name" -n "$gns" \
             -o jsonpath='{.spec.destination.server}' 2>/dev/null || true)
-          [[ "$cur_server" == "$old_server" ]] || continue
+          cur_name=$(oc get application.argoproj.io "$app_name" -n "$gns" \
+            -o jsonpath='{.spec.destination.name}' 2>/dev/null || true)
+          if [[ -n "$cur_server" && "$cur_server" == "$old_server" ]]; then
+            :
+          elif [[ -z "$cur_server" && -n "$cur_name" && "$cur_name" != "$dest_name" ]]; then
+            :
+          else
+            continue
+          fi
           p_display+=("Application/${app_name} -n ${gns}")
           p_app_ns+=("$gns"); p_app_name+=("$app_name"); p_kind+=("application")
         done < <(oc get application.argoproj.io -n "$gns" --no-headers \
@@ -2096,7 +2108,17 @@ for item in d.get('items',[]):
 import json,sys
 d=json.load(sys.stdin)
 dests=d.get('spec',{}).get('destinations',[])
-print('yes' if any(dest.get('server','')=='${old_server}' for dest in dests) else '')
+old_server='${old_server}'
+dest_name='${dest_name}'
+def needs_patch(dest):
+    srv=dest.get('server','')
+    nm=dest.get('name','')
+    if srv and srv==old_server:
+        return True
+    if not srv and nm and nm!=dest_name:
+        return True
+    return False
+print('yes' if any(needs_patch(dest) for dest in dests) else '')
 " 2>/dev/null || true)
           [[ "$has_old" == "yes" ]] || continue
           p_display+=("AppProject/${proj_name} -n ${gns}")
@@ -2105,84 +2127,153 @@ print('yes' if any(dest.get('server','')=='${old_server}' for dest in dests) els
                    -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
       done
 
+      # --- 4b. Group by ArgoCD project: AppProject first (sorted), its Applications next ---
+      local -a p_project=()
+      for j in "${!p_display[@]}"; do
+        if [[ "${p_kind[$j]}" == "appproject" ]]; then
+          p_project+=("${p_app_name[$j]}")
+        else
+          local proj
+          proj=$(oc get application.argoproj.io "${p_app_name[$j]}" -n "${p_app_ns[$j]}" \
+            -o jsonpath='{.spec.project}' 2>/dev/null || true)
+          p_project+=("${proj:-default}")
+        fi
+      done
+
+      local -a sorted_projects=()
+      if [[ ${#p_project[@]} -gt 0 ]]; then
+        while IFS= read -r pr; do
+          [[ -n "$pr" ]] && sorted_projects+=("$pr")
+        done < <(printf '%s\n' "${p_project[@]}" | sort -u)
+      fi
+
       if [[ ${#p_display[@]} -eq 0 ]]; then
-        warn "No Applications or AppProjects found with server '${old_server}' — nothing to patch."
+        warn "No Applications or AppProjects found needing a destination patch (server '${old_server}' or stale name) — nothing to patch."
       else
-        # --- 5. Show each patch with BEFORE, prompt run/skip/all ---
+        # --- 5. Show each patch grouped by project, with BEFORE, prompt run/skip/all per-project and per-resource ---
         echo ""
-        info "${#p_display[@]} resource(s) to patch — review each command:"
+        info "${#p_display[@]} resource(s) to patch across ${#sorted_projects[@]} ArgoCD project(s)."
         local patched=0 failed=0 skipped=0
-        local j
-        for j in "${!p_display[@]}"; do
-          local pns="${p_app_ns[$j]}" pname="${p_app_name[$j]}" pkind="${p_kind[$j]}"
+        local apply_all_remaining=false
+        local pr
+        for pr in "${sorted_projects[@]}"; do
+          # Build this project's group: AppProject entry (if any) first, then its Applications.
+          local -a group_idx=()
+          local j
+          for j in "${!p_display[@]}"; do
+            [[ "${p_project[$j]}" == "$pr" && "${p_kind[$j]}" == "appproject" ]] && group_idx+=("$j")
+          done
+          for j in "${!p_display[@]}"; do
+            [[ "${p_project[$j]}" == "$pr" && "${p_kind[$j]}" == "application" ]] && group_idx+=("$j")
+          done
+          [[ ${#group_idx[@]} -eq 0 ]] && continue
+
           echo ""
-          if [[ "$pkind" == "application" ]]; then
-            local bsrv bns bname
-            bsrv=$(oc get application.argoproj.io "$pname" -n "$pns" -o jsonpath='{.spec.destination.server}' 2>/dev/null || echo "(unknown)")
-            bns=$(oc get application.argoproj.io "$pname" -n "$pns" -o jsonpath='{.spec.destination.namespace}' 2>/dev/null || true)
-            bname=$(oc get application.argoproj.io "$pname" -n "$pns" -o jsonpath='{.spec.destination.name}' 2>/dev/null || true)
-            echo "  ┌─── BEFORE: Application/${pname} -n ${pns} $(printf '%0.s─' {1..20})┐"
-            printf "  │  %-77s│\n" "spec.destination.server:    ${bsrv}"
-            [[ -n "$bns" ]]   && printf "  │  %-77s│\n" "spec.destination.namespace: ${bns}"
-            [[ -n "$bname" ]] && printf "  │  %-77s│\n" "spec.destination.name:      ${bname}"
-            echo "  ├─── PATCH ──────────────────────────────────────────────────────────────────┤"
-            printf "  │  %-77s│\n" "oc patch application.argoproj.io ${pname} -n ${pns} \\"
-            printf "  │  %-77s│\n" "   --type=json -p '[{\"op\":\"remove\","
-            printf "  │  %-77s│\n" "   \"path\":\"/spec/destination/server\"},"
-            printf "  │  %-77s│\n" "   {\"op\":\"add\",\"path\":\"/spec/destination/name\","
-            printf "  │  %-77s│\n" "   \"value\":\"${dest_name}\"}]'"
-            echo "  └─────────────────────────────────────────────────────────────────────────────┘"
-          else
-            local bdests
-            bdests=$(oc get appproject.argoproj.io "$pname" -n "$pns" -o json 2>/dev/null | \
-              python3 -c "
+          echo "  ══════════ ArgoCD Project: ${pr}  (${#group_idx[@]} resource(s)) ══════════"
+
+          local group_ans="y"
+          if ! $apply_all_remaining; then
+            read -r -p "  Review/patch resources in project '${pr}'? [y/N/a(ll remaining projects)/q(uit)]: " group_ans
+            if [[ "$group_ans" =~ ^[Qq]$ ]]; then
+              info "Quitting patch loop."
+              return 0
+            elif [[ "$group_ans" =~ ^[Aa]$ ]]; then
+              apply_all_remaining=true
+            elif ! [[ "$group_ans" =~ ^[Yy]$ ]]; then
+              info "  Skipped project '${pr}' (${#group_idx[@]} resource(s))."
+              skipped=$((skipped + ${#group_idx[@]}))
+              continue
+            fi
+          fi
+
+          local apply_all_in_group=$apply_all_remaining
+          for j in "${group_idx[@]}"; do
+            local pns="${p_app_ns[$j]}" pname="${p_app_name[$j]}" pkind="${p_kind[$j]}"
+            if ! $apply_all_in_group; then
+              echo ""
+              if [[ "$pkind" == "application" ]]; then
+                local bsrv bns bname
+                bsrv=$(oc get application.argoproj.io "$pname" -n "$pns" -o jsonpath='{.spec.destination.server}' 2>/dev/null || true)
+                bns=$(oc get application.argoproj.io "$pname" -n "$pns" -o jsonpath='{.spec.destination.namespace}' 2>/dev/null || true)
+                bname=$(oc get application.argoproj.io "$pname" -n "$pns" -o jsonpath='{.spec.destination.name}' 2>/dev/null || true)
+                echo "  ┌─── BEFORE: Application/${pname} -n ${pns} $(printf '%0.s─' {1..20})┐"
+                [[ -n "$bsrv" ]]  && printf "  │  %-77s│\n" "spec.destination.server:    ${bsrv}"
+                [[ -n "$bns" ]]   && printf "  │  %-77s│\n" "spec.destination.namespace: ${bns}"
+                [[ -n "$bname" ]] && printf "  │  %-77s│\n" "spec.destination.name:      ${bname}"
+                echo "  ├─── PATCH ──────────────────────────────────────────────────────────────────┤"
+                printf "  │  %-77s│\n" "oc patch application.argoproj.io ${pname} -n ${pns} \\"
+                if [[ -n "$bsrv" ]]; then
+                  printf "  │  %-77s│\n" "   --type=json -p '[{\"op\":\"remove\","
+                  printf "  │  %-77s│\n" "   \"path\":\"/spec/destination/server\"},"
+                  printf "  │  %-77s│\n" "   {\"op\":\"add\",\"path\":\"/spec/destination/name\","
+                  printf "  │  %-77s│\n" "   \"value\":\"${dest_name}\"}]'"
+                else
+                  printf "  │  %-77s│\n" "   --type=json -p '[{\"op\":\"add\","
+                  printf "  │  %-77s│\n" "   \"path\":\"/spec/destination/name\","
+                  printf "  │  %-77s│\n" "   \"value\":\"${dest_name}\"}]'  (name: '${bname}' → '${dest_name}')"
+                fi
+                echo "  └─────────────────────────────────────────────────────────────────────────────┘"
+              else
+                local bdests
+                bdests=$(oc get appproject.argoproj.io "$pname" -n "$pns" -o json 2>/dev/null | \
+                  python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 for dest in d.get('spec',{}).get('destinations',[]):
     print('  server=%-55s namespace=%s' % (dest.get('server',''),dest.get('namespace','')))
 " 2>/dev/null || echo "  (unknown)")
-            # Compute the exact JSON patch payload that will be applied so the
-            # user sees the real command, not just a description.
-            local new_dests_preview
-            new_dests_preview=$(oc get appproject.argoproj.io "$pname" -n "$pns" -o json 2>/dev/null | \
-              python3 -c "
+                # Compute the exact JSON patch payload that will be applied so the
+                # user sees the real command, not just a description.
+                local new_dests_preview
+                new_dests_preview=$(oc get appproject.argoproj.io "$pname" -n "$pns" -o json 2>/dev/null | \
+                  python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 dests=d.get('spec',{}).get('destinations',[])
+old_server='${old_server}'
+dest_name='${dest_name}'
 for dest in dests:
-    if dest.get('server','')=='${old_server}':
+    srv=dest.get('server','')
+    nm=dest.get('name','')
+    if srv and srv==old_server:
         dest.pop('server', None)
-        dest['name']='${dest_name}'
+        dest['name']=dest_name
+    elif not srv and nm and nm!=dest_name:
+        dest['name']=dest_name
 print(json.dumps(dests))
 " 2>/dev/null)
-            echo "  ┌─── BEFORE: AppProject/${pname} -n ${pns} $(printf '%0.s─' {1..20})┐"
-            while IFS= read -r line; do printf "  │  %-77s│\n" "$line"; done <<< "$bdests"
-            echo "  ├─── PATCH ──────────────────────────────────────────────────────────────────┤"
-            printf "  │  %-77s│\n" "oc patch appproject.argoproj.io ${pname} -n ${pns} \\"
-            printf "  │  %-77s│\n" "   --type=merge -p '{\"spec\":{\"destinations\":"
-            printf "  │  %-77s│\n" "   ${new_dests_preview}}}'"
-            echo "  └─────────────────────────────────────────────────────────────────────────────┘"
-          fi
+                echo "  ┌─── BEFORE: AppProject/${pname} -n ${pns} $(printf '%0.s─' {1..20})┐"
+                while IFS= read -r line; do printf "  │  %-77s│\n" "$line"; done <<< "$bdests"
+                echo "  ├─── PATCH ──────────────────────────────────────────────────────────────────┤"
+                printf "  │  %-77s│\n" "oc patch appproject.argoproj.io ${pname} -n ${pns} \\"
+                printf "  │  %-77s│\n" "   --type=merge -p '{\"spec\":{\"destinations\":"
+                printf "  │  %-77s│\n" "   ${new_dests_preview}}}'"
+                echo "  └─────────────────────────────────────────────────────────────────────────────┘"
+              fi
 
-          local ans
-          read -r -p "  Apply this patch? [y/N/a(ll remaining)/q(uit)]: " ans
-          if [[ "$ans" =~ ^[Qq]$ ]]; then
-            info "Quitting patch loop."
-            return 0
-          elif [[ "$ans" =~ ^[Aa]$ ]]; then
-            local k
-            for k in $(seq "$j" "$((${#p_display[@]}-1))"); do
-              _patch_argocd_resource "${p_kind[$k]}" "${p_app_name[$k]}" "${p_app_ns[$k]}" "$old_server" "$dest_name" \
+              local ans
+              read -r -p "  Apply this patch? [y/N/a(ll in this project)/q(uit)]: " ans
+              if [[ "$ans" =~ ^[Qq]$ ]]; then
+                info "Quitting patch loop."
+                return 0
+              elif [[ "$ans" =~ ^[Aa]$ ]]; then
+                apply_all_in_group=true
+              elif [[ "$ans" =~ ^[Yy]$ ]]; then
+                _patch_argocd_resource "$pkind" "$pname" "$pns" "$old_server" "$dest_name" \
+                  && patched=$((patched+1)) || failed=$((failed+1))
+                continue
+              else
+                info "  Skipped ${pkind}/${pname} -n ${pns}."
+                skipped=$((skipped+1))
+                continue
+              fi
+            fi
+            # Reached when apply_all_in_group just became true, or was already true.
+            if $apply_all_in_group; then
+              _patch_argocd_resource "$pkind" "$pname" "$pns" "$old_server" "$dest_name" \
                 && patched=$((patched+1)) || failed=$((failed+1))
-            done
-            break
-          elif [[ "$ans" =~ ^[Yy]$ ]]; then
-            _patch_argocd_resource "$pkind" "$pname" "$pns" "$old_server" "$dest_name" \
-              && patched=$((patched+1)) || failed=$((failed+1))
-          else
-            info "  Skipped ${p_display[$j]}."
-            skipped=$((skipped+1))
-          fi
+            fi
+          done
         done
         ok "Patch round complete: ${patched} patched, ${skipped} skipped, ${failed} failed."
       fi
@@ -2199,12 +2290,21 @@ print(json.dumps(dests))
 
 # Apply a single ArgoCD Application or AppProject patch: replace
 # spec.destination(s).server with spec.destination(s).name = <dest_name>.
+# Also corrects entries that already use .name but with a stale/different value.
 _patch_argocd_resource() {
   local kind="$1" name="$2" ns="$3" old_server="$4" dest_name="$5"
   if [[ "$kind" == "application" ]]; then
+    local cur_server patch_json
+    cur_server=$(oc get application.argoproj.io "$name" -n "$ns" \
+      -o jsonpath='{.spec.destination.server}' 2>/dev/null || true)
+    if [[ -n "$cur_server" ]]; then
+      patch_json="[{\"op\":\"remove\",\"path\":\"/spec/destination/server\"},{\"op\":\"add\",\"path\":\"/spec/destination/name\",\"value\":\"${dest_name}\"}]"
+    else
+      patch_json="[{\"op\":\"add\",\"path\":\"/spec/destination/name\",\"value\":\"${dest_name}\"}]"
+    fi
     if oc patch application.argoproj.io "$name" -n "$ns" \
         --type=json \
-        -p="[{\"op\":\"remove\",\"path\":\"/spec/destination/server\"},{\"op\":\"add\",\"path\":\"/spec/destination/name\",\"value\":\"${dest_name}\"}]" \
+        -p="$patch_json" \
         >>"$LOG_FILE" 2>&1; then
       ok "  Patched Application '${name}' (${ns})"
       local after_server after_name
@@ -2228,10 +2328,16 @@ _patch_argocd_resource() {
 import json,sys
 d=json.load(sys.stdin)
 dests=d.get('spec',{}).get('destinations',[])
+old_server='${old_server}'
+dest_name='${dest_name}'
 for dest in dests:
-    if dest.get('server','')=='${old_server}':
+    srv=dest.get('server','')
+    nm=dest.get('name','')
+    if srv and srv==old_server:
         dest.pop('server', None)
-        dest['name']='${dest_name}'
+        dest['name']=dest_name
+    elif not srv and nm and nm!=dest_name:
+        dest['name']=dest_name
 print(json.dumps(dests))
 " 2>/dev/null)
     if [[ -n "$new_dests" ]] && oc patch appproject.argoproj.io "$name" -n "$ns" \
