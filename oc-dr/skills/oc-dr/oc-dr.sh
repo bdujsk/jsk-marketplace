@@ -1919,46 +1919,41 @@ patch_argocd_destinations() {
 
   # Main loop: pick namespace(s) → scan → patch → repeat or quit
   while true; do
-    # --- 1. Namespace selection ---
+    # --- 1. Namespace selection — always ask, even if only one namespace was found ---
     local selected_ns=()
-    if [[ ${#all_gitops_ns[@]} -eq 1 ]]; then
-      selected_ns=("${all_gitops_ns[0]}")
-      info "Using gitops namespace: ${selected_ns[0]}"
+    echo ""
+    info "GitOps namespaces found on cluster:"
+    printf "  %-4s  %s\n" "#" "NAMESPACE"
+    printf "  %-4s  %s\n" "---" "----------------------------------------"
+    local i
+    for i in "${!all_gitops_ns[@]}"; do
+      printf "  %-4s  %s\n" "$((i+1))" "${all_gitops_ns[$i]}"
+    done
+    echo ""
+    local choice
+    read -r -p "Select namespace(s) to patch (e.g. '1,2' or 'all', default all, 'q' to quit): " choice
+    [[ "$choice" =~ ^[Qq](uit)?$ ]] && { info "Exiting ArgoCD destination patch."; return 0; }
+    [[ -z "$choice" ]] && choice="all"
+    if [[ "$choice" == "all" ]]; then
+      selected_ns=("${all_gitops_ns[@]}")
     else
-      echo ""
-      info "GitOps namespaces found on cluster:"
-      printf "  %-4s  %s\n" "#" "NAMESPACE"
-      printf "  %-4s  %s\n" "---" "----------------------------------------"
-      local i
-      for i in "${!all_gitops_ns[@]}"; do
-        printf "  %-4s  %s\n" "$((i+1))" "${all_gitops_ns[$i]}"
-      done
-      echo ""
-      local choice
-      read -r -p "Select namespace(s) to patch (e.g. '1,2' or 'all', default all, 'q' to quit): " choice
-      [[ "$choice" =~ ^[Qq](uit)?$ ]] && { info "Exiting ArgoCD destination patch."; return 0; }
-      [[ -z "$choice" ]] && choice="all"
-      if [[ "$choice" == "all" ]]; then
-        selected_ns=("${all_gitops_ns[@]}")
-      else
-        local idx_list=() idx
-        IFS=',' read -ra idx_list <<< "$choice"
-        for idx in "${idx_list[@]}"; do
-          idx="$(echo "$idx" | tr -d '[:space:]')"
-          if [[ "$idx" =~ ^[0-9]+$ ]] && (( idx >= 1 && idx <= ${#all_gitops_ns[@]} )); then
-            selected_ns+=("${all_gitops_ns[$((idx-1))]}")
-          else
-            warn "Ignoring invalid selection: '${idx}'"
-          fi
-        done
-        if [[ ${#selected_ns[@]} -eq 0 ]]; then
-          warn "No valid namespace selected — try again."
-          continue
+      local idx_list=() idx
+      IFS=',' read -ra idx_list <<< "$choice"
+      for idx in "${idx_list[@]}"; do
+        idx="$(echo "$idx" | tr -d '[:space:]')"
+        if [[ "$idx" =~ ^[0-9]+$ ]] && (( idx >= 1 && idx <= ${#all_gitops_ns[@]} )); then
+          selected_ns+=("${all_gitops_ns[$((idx-1))]}")
+        else
+          warn "Ignoring invalid selection: '${idx}'"
         fi
+      done
+      if [[ ${#selected_ns[@]} -eq 0 ]]; then
+        warn "No valid namespace selected — try again."
+        continue
       fi
     fi
 
-    # --- 2. Scan selected namespaces for server URLs ---
+    # --- 2. Scan selected namespaces for server URLs (Applications AND AppProjects) ---
     local found_servers=()
     local gns
     for gns in "${selected_ns[@]}"; do
@@ -1979,6 +1974,23 @@ for item in d.get('items',[]):
 " 2>/dev/null | tee -a "$LOG_FILE" || warn "  Could not read destinations."
       echo ""
 
+      info "Scanning AppProjects in '${gns}'..."
+      local proj_count
+      proj_count=$(oc get appproject.argoproj.io -n "$gns" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+      info "  Found ${proj_count} AppProject(s) — destination summary:"
+      oc get appproject.argoproj.io -n "$gns" -o json 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for item in d.get('items',[]):
+    name=item['metadata']['name']
+    for dest in item.get('spec',{}).get('destinations',[]):
+        server=dest.get('server','')
+        dname=dest.get('name','')
+        ns=dest.get('namespace','')
+        print('  %-45s server=%-45s name=%-20s ns=%s' % (name, server or '(not set)', dname or '(not set)', ns))
+" 2>/dev/null | tee -a "$LOG_FILE" || warn "  Could not read destinations."
+      echo ""
+
       local srv_line
       while IFS= read -r srv_line; do
         [[ -z "$srv_line" ]] && continue
@@ -1994,6 +2006,26 @@ for item in d.get('items',[]):
     s=item.get('spec',{}).get('destination',{}).get('server','')
     if s and s not in seen:
         seen.add(s); print(s)
+" 2>/dev/null || true)
+
+      # Also collect server URLs referenced by AppProject destinations —
+      # otherwise an old server used only in an AppProject (with no matching
+      # Application) would never be offered as a candidate to replace.
+      while IFS= read -r srv_line; do
+        [[ -z "$srv_line" ]] && continue
+        local already=false
+        local fs
+        for fs in "${found_servers[@]:-}"; do [[ "$fs" == "$srv_line" ]] && already=true && break; done
+        $already || found_servers+=("$srv_line")
+      done < <(oc get appproject.argoproj.io -n "$gns" -o json 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+seen=set()
+for item in d.get('items',[]):
+    for dest in item.get('spec',{}).get('destinations',[]):
+        s=dest.get('server','')
+        if s and s not in seen:
+            seen.add(s); print(s)
 " 2>/dev/null || true)
     done
 
@@ -2106,12 +2138,25 @@ d=json.load(sys.stdin)
 for dest in d.get('spec',{}).get('destinations',[]):
     print('  server=%-55s namespace=%s' % (dest.get('server',''),dest.get('namespace','')))
 " 2>/dev/null || echo "  (unknown)")
+            # Compute the exact JSON patch payload that will be applied so the
+            # user sees the real command, not just a description.
+            local new_dests_preview
+            new_dests_preview=$(oc get appproject.argoproj.io "$pname" -n "$pns" -o json 2>/dev/null | \
+              python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+dests=d.get('spec',{}).get('destinations',[])
+for dest in dests:
+    if dest.get('server','')=='${old_server}':
+        dest['server']='${new_server}'
+print(json.dumps(dests))
+" 2>/dev/null)
             echo "  ┌─── BEFORE: AppProject/${pname} -n ${pns} $(printf '%0.s─' {1..20})┐"
             while IFS= read -r line; do printf "  │  %-77s│\n" "$line"; done <<< "$bdests"
             echo "  ├─── PATCH ──────────────────────────────────────────────────────────────────┤"
             printf "  │  %-77s│\n" "oc patch appproject.argoproj.io ${pname} -n ${pns} \\"
-            printf "  │  %-77s│\n" "   --type=merge (replace server '${old_server}'"
-            printf "  │  %-77s│\n" "   → '${new_server}')"
+            printf "  │  %-77s│\n" "   --type=merge -p '{\"spec\":{\"destinations\":"
+            printf "  │  %-77s│\n" "   ${new_dests_preview}}}'"
             echo "  └─────────────────────────────────────────────────────────────────────────────┘"
           fi
 
@@ -2316,7 +2361,7 @@ CHALLENGES
   printf "${R}"
   echo ""
 
-  _play_dr_animation
+  $DRY_RUN || _play_dr_animation
   echo ""
 
   cat <<'BANNER'
