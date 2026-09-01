@@ -2572,6 +2572,60 @@ CHALLENGES
 BANNER
   printf "${R}"
   echo ""
+
+  local C='\033[1;36m'
+  printf "${C}"
+  echo "  ────────────────────────────────────────────────────────────────────────────────────────────────"
+  echo "  OPTIONAL — DR cluster registration for ArgoCD (copy/paste, edit values as needed)"
+  echo "  Creates a token-based ServiceAccount + cluster Secret so ArgoCD can register the DR"
+  echo "  cluster as an additional destination (e.g. for step 8, patch ArgoCD destinations)."
+  echo "  Note: 'namespace: ose-gitops-bd' below may need to be 'ose-gitops' or another"
+  echo "  ArgoCD instance namespace, depending on which ArgoCD you are registering this for."
+  echo "  Note: 'name=bdpaasidr' and 'server=https://api.c02i.paasdr.bdunet.dk:6443' depend on"
+  echo "  the actual DR cluster name/API URL — edit both to match your target DR cluster."
+  echo "  ────────────────────────────────────────────────────────────────────────────────────────────────"
+  printf "${R}"
+  cat <<'DRCLUSTERSECRET'
+
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: ose-gitops-bd-token-dr
+  namespace: ose-gitops-bd
+  labels:
+    app.kubernetes.io/instance: openshift-gitops-custom-instances-app
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ose-gitops-bd-token-dr
+  namespace: ose-gitops-bd
+  annotations:
+    kubernetes.io/service-account.name: ose-gitops-bd-token-dr
+type: kubernetes.io/service-account-token
+
+# --- after applying the above, run: ---
+TOKEN=$(oc get secret ose-gitops-bd-token-dr -n ose-gitops-bd -o jsonpath='{.data.token}' | base64 -d)
+CA=$(oc get secret ose-gitops-bd-token-dr -n ose-gitops-bd -o jsonpath='{.data.ca\.crt}')
+
+oc create secret generic cluster-ose-gitops-bd-dr \
+  -n ose-gitops-bd \
+  --from-literal=name=bdpaasidr \
+  --from-literal=server=https://api.c02i.paasdr.bdunet.dk:6443 \
+  --from-literal=config="{\"bearerToken\":\"${TOKEN}\",\"tlsClientConfig\":{\"caData\":\"${CA}\"}}" \
+  --dry-run=client -o yaml \
+  | oc apply -f -
+
+oc label secret cluster-ose-gitops-bd-dr \
+  -n ose-gitops-bd \
+  argocd.argoproj.io/secret-type=cluster --overwrite
+
+DRCLUSTERSECRET
+  printf "${C}"
+  echo "  ────────────────────────────────────────────────────────────────────────────────────────────────"
+  printf "${R}"
+  echo ""
   read -r -p "  Press Enter to continue..." _pause_input
   echo ""
 
