@@ -1902,10 +1902,22 @@ patch_argocd_destinations() {
     [[ -z "$new_server" ]] && { warn "No URL entered — skipping patch."; return 0; }
   fi
 
-  local dest_name
-  read -r -p "Destination name to use in place of 'server' [in-cluster]: " dest_name
-  dest_name="${dest_name:-in-cluster}"
-  info "Will replace matching 'spec.destination(s).server' with 'name: ${dest_name}'."
+  local patch_mode
+  read -r -p "Replace 'server' with: 1) name (e.g. 'in-cluster')  2) a new server URL  [1]: " patch_mode
+  patch_mode="${patch_mode:-1}"
+
+  local dest_name="" write_server=""
+  if [[ "$patch_mode" == "2" ]]; then
+    patch_mode="server"
+    read -r -p "New server URL to write in place of 'server' [${new_server}]: " write_server
+    write_server="${write_server:-$new_server}"
+    info "Will replace matching 'spec.destination(s).server' with 'server: ${write_server}'."
+  else
+    patch_mode="name"
+    read -r -p "Destination name to use in place of 'server' [in-cluster]: " dest_name
+    dest_name="${dest_name:-in-cluster}"
+    info "Will replace matching 'spec.destination(s).server' with 'name: ${dest_name}'."
+  fi
 
   # Discover all *gitops* namespaces once
   local all_gitops_ns=()
@@ -2071,12 +2083,17 @@ for item in d.get('items',[]):
     if [[ -z "$old_server" ]]; then
       info "No old server URL — skipping patch for this selection."
     else
-      info "Replacing: server=${old_server}  →  name=${dest_name}"
+      if [[ "$patch_mode" == "server" ]]; then
+        info "Replacing: server=${old_server}  →  server=${write_server}"
+      else
+        info "Replacing: server=${old_server}  →  name=${dest_name}"
+      fi
 
       # --- 4. Build patch list ---
       # Match resources two ways: (a) server == old_server (classic case),
-      # or (b) already using .name but with a different value than the
-      # desired dest_name — these also need to be corrected.
+      # or (b) — in "name" mode: already using .name but with a different
+      # value than the desired dest_name; in "server" mode: already using
+      # .name at all (needs converting back to an explicit server URL).
       local -a p_display=() p_app_ns=() p_app_name=() p_kind=()
       for gns in "${selected_ns[@]}"; do
         local app_name
@@ -2089,7 +2106,9 @@ for item in d.get('items',[]):
             -o jsonpath='{.spec.destination.name}' 2>/dev/null || true)
           if [[ -n "$cur_server" && "$cur_server" == "$old_server" ]]; then
             :
-          elif [[ -z "$cur_server" && -n "$cur_name" && "$cur_name" != "$dest_name" ]]; then
+          elif [[ "$patch_mode" == "name" && -z "$cur_server" && -n "$cur_name" && "$cur_name" != "$dest_name" ]]; then
+            :
+          elif [[ "$patch_mode" == "server" && -z "$cur_server" && -n "$cur_name" ]]; then
             :
           else
             continue
@@ -2110,12 +2129,15 @@ d=json.load(sys.stdin)
 dests=d.get('spec',{}).get('destinations',[])
 old_server='${old_server}'
 dest_name='${dest_name}'
+patch_mode='${patch_mode}'
 def needs_patch(dest):
     srv=dest.get('server','')
     nm=dest.get('name','')
     if srv and srv==old_server:
         return True
-    if not srv and nm and nm!=dest_name:
+    if patch_mode=='name' and not srv and nm and nm!=dest_name:
+        return True
+    if patch_mode=='server' and not srv and nm:
         return True
     return False
 print('yes' if any(needs_patch(dest) for dest in dests) else '')
@@ -2202,15 +2224,28 @@ print('yes' if any(needs_patch(dest) for dest in dests) else '')
                 [[ -n "$bname" ]] && printf "  │  %-77s│\n" "spec.destination.name:      ${bname}"
                 echo "  ├─── PATCH ──────────────────────────────────────────────────────────────────┤"
                 printf "  │  %-77s│\n" "oc patch application.argoproj.io ${pname} -n ${pns} \\"
-                if [[ -n "$bsrv" ]]; then
-                  printf "  │  %-77s│\n" "   --type=json -p '[{\"op\":\"remove\","
-                  printf "  │  %-77s│\n" "   \"path\":\"/spec/destination/server\"},"
-                  printf "  │  %-77s│\n" "   {\"op\":\"add\",\"path\":\"/spec/destination/name\","
-                  printf "  │  %-77s│\n" "   \"value\":\"${dest_name}\"}]'"
+                if [[ "$patch_mode" == "server" ]]; then
+                  if [[ -n "$bsrv" ]]; then
+                    printf "  │  %-77s│\n" "   --type=json -p '[{\"op\":\"replace\","
+                    printf "  │  %-77s│\n" "   \"path\":\"/spec/destination/server\","
+                    printf "  │  %-77s│\n" "   \"value\":\"${write_server}\"}]'"
+                  else
+                    printf "  │  %-77s│\n" "   --type=json -p '[{\"op\":\"remove\","
+                    printf "  │  %-77s│\n" "   \"path\":\"/spec/destination/name\"},"
+                    printf "  │  %-77s│\n" "   {\"op\":\"add\",\"path\":\"/spec/destination/server\","
+                    printf "  │  %-77s│\n" "   \"value\":\"${write_server}\"}]'  (name: '${bname}' → server)"
+                  fi
                 else
-                  printf "  │  %-77s│\n" "   --type=json -p '[{\"op\":\"add\","
-                  printf "  │  %-77s│\n" "   \"path\":\"/spec/destination/name\","
-                  printf "  │  %-77s│\n" "   \"value\":\"${dest_name}\"}]'  (name: '${bname}' → '${dest_name}')"
+                  if [[ -n "$bsrv" ]]; then
+                    printf "  │  %-77s│\n" "   --type=json -p '[{\"op\":\"remove\","
+                    printf "  │  %-77s│\n" "   \"path\":\"/spec/destination/server\"},"
+                    printf "  │  %-77s│\n" "   {\"op\":\"add\",\"path\":\"/spec/destination/name\","
+                    printf "  │  %-77s│\n" "   \"value\":\"${dest_name}\"}]'"
+                  else
+                    printf "  │  %-77s│\n" "   --type=json -p '[{\"op\":\"add\","
+                    printf "  │  %-77s│\n" "   \"path\":\"/spec/destination/name\","
+                    printf "  │  %-77s│\n" "   \"value\":\"${dest_name}\"}]'  (name: '${bname}' → '${dest_name}')"
+                  fi
                 fi
                 echo "  └─────────────────────────────────────────────────────────────────────────────┘"
               else
@@ -2232,14 +2267,25 @@ d=json.load(sys.stdin)
 dests=d.get('spec',{}).get('destinations',[])
 old_server='${old_server}'
 dest_name='${dest_name}'
+write_server='${write_server}'
+patch_mode='${patch_mode}'
 for dest in dests:
     srv=dest.get('server','')
     nm=dest.get('name','')
-    if srv and srv==old_server:
-        dest.pop('server', None)
-        dest['name']=dest_name
-    elif not srv and nm and nm!=dest_name:
-        dest['name']=dest_name
+    if patch_mode=='server':
+        if srv and srv==old_server:
+            dest['server']=write_server
+        elif not srv and nm:
+            dest.pop('name', None)
+            dest['server']=write_server
+    else:
+        if srv and srv==old_server:
+            dest.pop('server', None)
+            dest['name']=dest_name
+            dest['namespace']='*'
+        elif not srv and nm and nm!=dest_name:
+            dest['name']=dest_name
+            dest['namespace']='*'
 print(json.dumps(dests))
 " 2>/dev/null)
                 echo "  ┌─── BEFORE: AppProject/${pname} -n ${pns} $(printf '%0.s─' {1..20})┐"
@@ -2259,7 +2305,7 @@ print(json.dumps(dests))
               elif [[ "$ans" =~ ^[Aa]$ ]]; then
                 apply_all_in_group=true
               elif [[ "$ans" =~ ^[Yy]$ ]]; then
-                _patch_argocd_resource "$pkind" "$pname" "$pns" "$old_server" "$dest_name" \
+                _patch_argocd_resource "$pkind" "$pname" "$pns" "$old_server" "$patch_mode" "$dest_name" "$write_server" \
                   && patched=$((patched+1)) || failed=$((failed+1))
                 continue
               else
@@ -2270,7 +2316,7 @@ print(json.dumps(dests))
             fi
             # Reached when apply_all_in_group just became true, or was already true.
             if $apply_all_in_group; then
-              _patch_argocd_resource "$pkind" "$pname" "$pns" "$old_server" "$dest_name" \
+              _patch_argocd_resource "$pkind" "$pname" "$pns" "$old_server" "$patch_mode" "$dest_name" "$write_server" \
                 && patched=$((patched+1)) || failed=$((failed+1))
             fi
           done
@@ -2288,19 +2334,29 @@ print(json.dumps(dests))
   ok "ArgoCD destination patching done."
 }
 
-# Apply a single ArgoCD Application or AppProject patch: replace
-# spec.destination(s).server with spec.destination(s).name = <dest_name>.
-# Also corrects entries that already use .name but with a stale/different value.
+# Apply a single ArgoCD Application or AppProject patch.
+# patch_mode="name":   replace spec.destination(s).server with spec.destination(s).name = <dest_name>
+#                       (also corrects entries that already use .name but with a stale/different value).
+# patch_mode="server":  replace spec.destination(s).server with a new server URL <write_server>
+#                       (also converts entries that use .name back to an explicit server URL).
 _patch_argocd_resource() {
-  local kind="$1" name="$2" ns="$3" old_server="$4" dest_name="$5"
+  local kind="$1" name="$2" ns="$3" old_server="$4" patch_mode="$5" dest_name="$6" write_server="$7"
   if [[ "$kind" == "application" ]]; then
     local cur_server patch_json
     cur_server=$(oc get application.argoproj.io "$name" -n "$ns" \
       -o jsonpath='{.spec.destination.server}' 2>/dev/null || true)
-    if [[ -n "$cur_server" ]]; then
-      patch_json="[{\"op\":\"remove\",\"path\":\"/spec/destination/server\"},{\"op\":\"add\",\"path\":\"/spec/destination/name\",\"value\":\"${dest_name}\"}]"
+    if [[ "$patch_mode" == "server" ]]; then
+      if [[ -n "$cur_server" ]]; then
+        patch_json="[{\"op\":\"replace\",\"path\":\"/spec/destination/server\",\"value\":\"${write_server}\"}]"
+      else
+        patch_json="[{\"op\":\"remove\",\"path\":\"/spec/destination/name\"},{\"op\":\"add\",\"path\":\"/spec/destination/server\",\"value\":\"${write_server}\"}]"
+      fi
     else
-      patch_json="[{\"op\":\"add\",\"path\":\"/spec/destination/name\",\"value\":\"${dest_name}\"}]"
+      if [[ -n "$cur_server" ]]; then
+        patch_json="[{\"op\":\"remove\",\"path\":\"/spec/destination/server\"},{\"op\":\"add\",\"path\":\"/spec/destination/name\",\"value\":\"${dest_name}\"}]"
+      else
+        patch_json="[{\"op\":\"add\",\"path\":\"/spec/destination/name\",\"value\":\"${dest_name}\"}]"
+      fi
     fi
     if oc patch application.argoproj.io "$name" -n "$ns" \
         --type=json \
@@ -2330,14 +2386,25 @@ d=json.load(sys.stdin)
 dests=d.get('spec',{}).get('destinations',[])
 old_server='${old_server}'
 dest_name='${dest_name}'
+write_server='${write_server}'
+patch_mode='${patch_mode}'
 for dest in dests:
     srv=dest.get('server','')
     nm=dest.get('name','')
-    if srv and srv==old_server:
-        dest.pop('server', None)
-        dest['name']=dest_name
-    elif not srv and nm and nm!=dest_name:
-        dest['name']=dest_name
+    if patch_mode=='server':
+        if srv and srv==old_server:
+            dest['server']=write_server
+        elif not srv and nm:
+            dest.pop('name', None)
+            dest['server']=write_server
+    else:
+        if srv and srv==old_server:
+            dest.pop('server', None)
+            dest['name']=dest_name
+            dest['namespace']='*'
+        elif not srv and nm and nm!=dest_name:
+            dest['name']=dest_name
+            dest['namespace']='*'
 print(json.dumps(dests))
 " 2>/dev/null)
     if [[ -n "$new_dests" ]] && oc patch appproject.argoproj.io "$name" -n "$ns" \
