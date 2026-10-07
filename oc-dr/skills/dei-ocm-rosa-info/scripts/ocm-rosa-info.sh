@@ -54,7 +54,7 @@ done | jq -s '.')
 merged_json=$(echo "$merged_json" | jq '
   map(. + {
     Group: (
-      (.name // "" | capture("(?<g>[a-zA-Z0-9]+-[a-zA-Z][0-9]+)$")?.g)
+      (.name // "" | capture("(?<g>[a-zA-Z0-9]+-[a-zA-Z][0-9]+)$").g?)
       // (.name // "ungrouped")
     )
   })
@@ -174,26 +174,30 @@ else
   awk -v max="$trend_max" -v width="$BAR_WIDTH" 'BEGIN { printf "    Scale: each # ~ %.1f core-hours. Peak day: %d\n", max/width, max }'
 fi
 
-echo
-echo "=== Usage by Billing Category vs Threshold (last 30 days) ===" >&2
-# Mirrors the 3 series on the console.redhat.com/subscriptions/usage/openshift
-# graph: "Monthly pre-paid" and "Monthly on-demand" (cumulative core-hours
-# consumed from each billing pool, via billing_category=prepaid/on-demand with
-# use_running_totals_format=true) plotted against the flat "Pre-paid
-# subscription threshold" line (the contracted capacity, via the capacity API).
-prepaid_json=$(curl -s -H "Authorization: Bearer $RHSM_TOKEN" --get   "https://console.redhat.com/api/rhsm-subscriptions/v1/tally/products/$RHSM_PRODUCT/$RHSM_METRIC"   --data-urlencode "granularity=DAILY"   --data-urlencode "beginning=$trend_begin"   --data-urlencode "ending=$trend_end"   --data-urlencode "billing_category=prepaid"   --data-urlencode "use_running_totals_format=true" || echo '{}')
+print_billing_vs_threshold() {
+  local label="$1" period_begin="$2" period_end="$3"
 
-ondemand_json=$(curl -s -H "Authorization: Bearer $RHSM_TOKEN" --get   "https://console.redhat.com/api/rhsm-subscriptions/v1/tally/products/$RHSM_PRODUCT/$RHSM_METRIC"   --data-urlencode "granularity=DAILY"   --data-urlencode "beginning=$trend_begin"   --data-urlencode "ending=$trend_end"   --data-urlencode "billing_category=on-demand"   --data-urlencode "use_running_totals_format=true" || echo '{}')
+  echo
+  echo "=== Usage by Billing Category vs Threshold ($label) ===" >&2
+  echo
+  echo "=== Usage by Billing Category vs Threshold ($label) ==="
 
-threshold_json=$(curl -s -H "Authorization: Bearer $RHSM_TOKEN" --get   "https://console.redhat.com/api/rhsm-subscriptions/v1/capacity/products/$RHSM_PRODUCT/$RHSM_METRIC"   --data-urlencode "granularity=DAILY"   --data-urlencode "beginning=$trend_begin"   --data-urlencode "ending=$trend_end" || echo '{}')
+  local prepaid_json ondemand_json threshold_json threshold_val
+  prepaid_json=$(curl -s -H "Authorization: Bearer $RHSM_TOKEN" --get   "https://console.redhat.com/api/rhsm-subscriptions/v1/tally/products/$RHSM_PRODUCT/$RHSM_METRIC"   --data-urlencode "granularity=DAILY"   --data-urlencode "beginning=$period_begin"   --data-urlencode "ending=$period_end"   --data-urlencode "billing_category=prepaid"   --data-urlencode "use_running_totals_format=true" || echo '{}')
 
-threshold_val=$(echo "$threshold_json" | jq '[.data[].value] | max // 0')
+  ondemand_json=$(curl -s -H "Authorization: Bearer $RHSM_TOKEN" --get   "https://console.redhat.com/api/rhsm-subscriptions/v1/tally/products/$RHSM_PRODUCT/$RHSM_METRIC"   --data-urlencode "granularity=DAILY"   --data-urlencode "beginning=$period_begin"   --data-urlencode "ending=$period_end"   --data-urlencode "billing_category=on-demand"   --data-urlencode "use_running_totals_format=true" || echo '{}')
 
-if [ "$threshold_val" -eq 0 ]; then
-  echo "    No threshold/capacity data available for this period."
-else
-  BAR_WIDTH=40
-  jq -n --argjson prepaid "$prepaid_json" --argjson ondemand "$ondemand_json" --argjson max "$threshold_val" --argjson width "$BAR_WIDTH" -r '
+  threshold_json=$(curl -s -H "Authorization: Bearer $RHSM_TOKEN" --get   "https://console.redhat.com/api/rhsm-subscriptions/v1/capacity/products/$RHSM_PRODUCT/$RHSM_METRIC"   --data-urlencode "granularity=DAILY"   --data-urlencode "beginning=$period_begin"   --data-urlencode "ending=$period_end" || echo '{}')
+
+  threshold_val=$(echo "$threshold_json" | jq '[.data[].value] | max // 0')
+
+  if [ "$threshold_val" -eq 0 ] || [ "$(echo "$prepaid_json" | jq '.data | length // 0')" -eq 0 ]; then
+    echo "    No threshold/capacity data available for this period."
+    return
+  fi
+
+  local bar_width=40
+  jq -n --argjson prepaid "$prepaid_json" --argjson ondemand "$ondemand_json" --argjson max "$threshold_val" --argjson width "$bar_width" -r '
     (["DATE","PREPAID_CUML","ON_DEMAND_CUML","PCT_OF_THRESHOLD"] | @tsv),
     (range(0; ($prepaid.data | length)) as $i |
       [$prepaid.data[$i], $ondemand.data[$i]] as [$p, $o] |
@@ -209,15 +213,15 @@ else
   echo "    Pre-paid subscription threshold: $threshold_val core-hours"
   echo
   echo "    Cumulative usage vs threshold (last day of period):"
-  jq -n --argjson prepaid "$prepaid_json" --argjson ondemand "$ondemand_json" --argjson max "$threshold_val" --argjson width "$BAR_WIDTH" -r '
+  jq -n --argjson prepaid "$prepaid_json" --argjson ondemand "$ondemand_json" --argjson max "$threshold_val" --argjson width "$bar_width" -r '
     ($prepaid.data[-1].value) as $p |
     ($ondemand.data[-1].value) as $o |
     ((($p + $o) / $max) * $width) as $ratio |
     ([($ratio | floor), $width] | min) as $barlen |
     "\($barlen)\t\(if $ratio > $width then "OVER" else "OK" end)"
-  ' | while IFS=$'	' read -r barlen overflag; do
+  ' | while IFS=$'\t' read -r barlen overflag; do
       bar=$(printf '%*s' "$barlen" '' | tr ' ' '#')
-      rest=$((BAR_WIDTH - barlen))
+      rest=$((bar_width - barlen))
       [ "$rest" -lt 0 ] && rest=0
       pad=$(printf '%*s' "$rest" '' | tr ' ' '.')
       echo "    [${bar}${pad}] (threshold = right edge)"
@@ -225,7 +229,17 @@ else
         echo "    NOTE: usage has exceeded the pre-paid threshold - the excess is now being billed as on-demand overage."
       fi
     done
-fi
+}
+
+cur_month_start=$(date -u +%Y-%m-01T00:00:00Z)
+cur_month_end=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+prev_month_start=$(date -u -v-1m +%Y-%m-01T00:00:00Z 2>/dev/null || date -u -d "$(date -u +%Y-%m-01) -1 month" +%Y-%m-01T00:00:00Z)
+prev_month_end="$cur_month_start"
+prev_month_label=$(LC_TIME=C date -u -j -f %Y-%m-%dT%H:%M:%SZ "$prev_month_start" +"%B %Y" 2>/dev/null || LC_TIME=C date -u -d "$prev_month_start" +"%B %Y")
+cur_month_label=$(LC_TIME=C date -u -j -f %Y-%m-%dT%H:%M:%SZ "$cur_month_start" +"%B %Y" 2>/dev/null || LC_TIME=C date -u -d "$cur_month_start" +"%B %Y")
+
+print_billing_vs_threshold "Previous Month: $prev_month_label" "$prev_month_start" "$prev_month_end"
+print_billing_vs_threshold "Current Month: $cur_month_label" "$cur_month_start" "$cur_month_end"
 
 echo
 echo "=== Upgrade Status (per cluster) ==="
@@ -331,7 +345,7 @@ while IFS=$'\t' read -r name external_id; do
     echo "$hits_json" | jq -r '
       (["CVE","RISK","DESCRIPTION","RULE_ID"] | @tsv),
       (.[] | [
-        (((.description + " " + .rule_id) | capture("(?<c>CVE-[0-9]{4}-[0-9]+)")?.c) // "n/a"),
+        (((.description + " " + .rule_id) | capture("(?<c>CVE-[0-9]{4}-[0-9]+)").c?) // "n/a"),
         (if .total_risk == 4 then "CRITICAL" elif .total_risk == 3 then "HIGH" else (.total_risk|tostring) end),
         .description,
         .rule_id

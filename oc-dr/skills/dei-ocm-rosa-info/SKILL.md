@@ -5,6 +5,7 @@ description: Reports on ROSA/OpenShift clusters (vCPUs, subscriptions, capacity/
 
 # ROSA vCPU & Cluster Status Report
 
+
 Runs `ocm-rosa-info.sh`, a bash script that pulls live data from the OCM
 CLI and console.redhat.com APIs and prints a full text report covering:
 
@@ -54,7 +55,22 @@ CLI and console.redhat.com APIs and prints a full text report covering:
   securitydata API).
 - **`column`** and **`awk`** - standard on macOS/Linux, used for table formatting.
 
-## Running the script
+
+## Instructions for Running the script
+
+Run `ocm whoami` first.
+If not logged in, tell the user to run`ocm login --token=...` themselves.
+Never ask for or print the token.
+
+Run `scripts/ocm-rosa-info.sh > /tmp/rosa-report.txt` (stderr = progress).
+Read the report in sections; don't paste it in full.
+Lead with a short summary: total vCPUs, overage vs. prepaid threshold, clusters with pending upgrades, and CVEs with CVSS > 8.
+
+For CVEs, say which look like PSIRT false positives, and point to the Advisory link before recommending any action.
+
+The script is read-only.
+Do not run upgrades or modify clusters.
+
 
 ```bash
 ./ocm-rosa-info.sh
